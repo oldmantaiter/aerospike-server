@@ -1,0 +1,7 @@
+/etc/aerospike/aerospike_ssd.conf
+%config(noreplace) /etc/logrotate.d/aerospike
+%config(noreplace) /etc/aerospike/aerospike.conf
+%defattr(-,aerospike,aerospike)
+%dir /var/log/aerospike
+%dir /var/run/aerospike
+/opt/aerospike
