@@ -330,7 +330,7 @@ bool increase_partition_version_tree_path(as_partition_vinfo *vinfo, cf_node fsn
 
 /*
  * Set the version of the partition to the new value but only if the old one matches
- * This function is only called from as_partition_balance, so do not flush
+ * This function is only called from as_partition_balance_new, so do not flush to storage
  */
 void set_new_partition_version(as_partition_vinfo *dest, as_partition_vinfo *old, as_partition_vinfo *new, as_namespace *ns, size_t pid) {
 
@@ -422,8 +422,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	p->origin = 0;
 	p->target = 0;
 	p->state = AS_PARTITION_STATE_ABSENT;
-	p->rxstate = AS_PARTITION_MIG_RX_STATE_NONE;
-	p->txstate = AS_PARTITION_MIG_TX_STATE_NONE;
 	p->pending_writes = 0;
 	p->pending_migrate_tx = 0;
 	p->pending_migrate_rx = 0;
@@ -440,7 +438,7 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	memset(&p->vinfoset, 0, sizeof(p->vinfoset));
 	memset(p->old_sl, 0, sizeof(p->old_sl));
 	p->p_repl_factor = ns->replication_factor;
-	p->last_outgoing_ldt_version = 0;
+	p->current_outgoing_ldt_version = 0;
 
 	p->cluster_key = 0;
 
@@ -542,7 +540,7 @@ int set_partition_desync(as_partition *p, as_partition_vinfo *vinfo, as_namespac
 	int retval = -1;
 	if (true == g_allow_migrations)
 	{
-		// Always set flush flag as this is never called from as_partition_balance
+		// Always set flush flag as this is never called from as_partition_balance_new
 		set_partition_desync_lockfree(p, vinfo, ns, pid, true);
 		retval = 0;
 	}
@@ -586,9 +584,7 @@ void set_partition_absent_lockfree(as_partition *p, as_partition_vinfo *vinfo, a
 		as_index_tree_release(sub_t, ns);
 	}
 
-	p->rxstate     = AS_PARTITION_MIG_RX_STATE_NONE;
-	p->txstate     = AS_PARTITION_MIG_TX_STATE_NONE;
-	p->last_outgoing_ldt_version = 0;
+	p->current_outgoing_ldt_version = 0;
 	clear_partition_version_in_storage(ns, pid, flush);
 	memset(vinfo, 0, sizeof(as_partition_vinfo));
 
@@ -1710,23 +1706,6 @@ as_partition_getstate_str(int state)
 }
 
 char
-as_partition_getrxmigstate_str(int state)
-{
-	switch (state) {
-		case AS_PARTITION_MIG_RX_STATE_NONE:
-			return 'N';
-		case AS_PARTITION_MIG_RX_STATE_INIT:
-			return 'I';
-		case AS_PARTITION_MIG_RX_STATE_SUBRECORD:
-			return 'C';
-		case AS_PARTITION_MIG_RX_STATE_RECORD:
-			return 'P';
-		default:
-			return '?';
-	}
-}
-
-char
 as_partition_gettxmigstate_str(int state)
 {
 	switch (state) {
@@ -1753,8 +1732,6 @@ as_partition_getinfo_str(cf_dyn_buf *db)
 
 			as_partition *p = &ns->partitions[j];
 			char state_c = as_partition_getstate_str(p->state);
-			char m_tx_state_c = as_partition_gettxmigstate_str(p->txstate);
-			char m_rx_state_c = as_partition_getrxmigstate_str(p->rxstate);
 
 			// find myself in the replica list
 			int replica_idx;
@@ -1787,11 +1764,7 @@ as_partition_getinfo_str(cf_dyn_buf *db)
 			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64(db, (uint64_t) p->sub_vp->elements);  // Subrecords
 			cf_dyn_buf_append_char(db, ':');
-			cf_dyn_buf_append_char(db, m_rx_state_c);           // migration rx state
-			cf_dyn_buf_append_char(db, ':');
-			cf_dyn_buf_append_char(db, m_tx_state_c);           // migration tx state
-			cf_dyn_buf_append_char(db, ':');
-			cf_dyn_buf_append_uint64(db, p->last_outgoing_ldt_version); // Current migrate out version ...
+			cf_dyn_buf_append_uint64(db, p->current_outgoing_ldt_version); // Current migrate out version ...
 			// no meaning if migration is finished
 			cf_dyn_buf_append_char(db, ';');
 		}
@@ -1826,6 +1799,8 @@ as_partition_get_master_prole_stats(as_namespace* ns, as_master_prole_stats* p_s
 {
 	p_stats->n_master_records = 0;
 	p_stats->n_prole_records = 0;
+	p_stats->n_master_sub_records = 0;
+	p_stats->n_prole_sub_records = 0;
 
 	as_partition_reservation rsv;
 	uint32_t num_records;
@@ -1841,6 +1816,7 @@ as_partition_get_master_prole_stats(as_namespace* ns, as_master_prole_stats* p_s
 
 			num_records = rsv.p->vp->elements;
 			p_stats->n_master_records += num_records;
+			p_stats->n_master_sub_records += rsv.p->sub_vp->elements;
 
 			as_partition_release(&rsv);
 			cf_atomic_int_decr(&g_config.nsup_tree_count);
@@ -1852,6 +1828,7 @@ as_partition_get_master_prole_stats(as_namespace* ns, as_master_prole_stats* p_s
 
 			num_records = rsv.p->vp->elements;
 			p_stats->n_prole_records += num_records;
+			p_stats->n_prole_sub_records += rsv.p->sub_vp->elements;
 
 			as_partition_release(&rsv);
 			cf_atomic_int_decr(&g_config.nsup_tree_count);
@@ -2008,6 +1985,8 @@ as_partition_migrate_tx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 		// p->vp = as_index_create(ns->arena, (as_index_value_destructor)&as_record_destroy, ns);
 		cf_atomic_int_incr(&g_config.partition_generation);
 	}
+
+	p->current_outgoing_ldt_version = 0;
 
 	if (0 != pthread_mutex_unlock(&p->lock))
 		cf_crash(AS_PARTITION, "couldn't release partition state lock: %s", cf_strerror(errno));
@@ -2883,6 +2862,7 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 			if (memcmp(&ns->partitions[j].version_info, &paxos->c_partition_vinfo[i][self_index][j], sizeof(as_partition_vinfo)) != 0)	{
 				found_error = true;
 				print_partition_versions(ns->name, j, &ns->partitions[j].version_info, "Global", &paxos->c_partition_vinfo[i][self_index][j], "Local");
+				break;
 			}
 	}
 	if (true == found_error) {
@@ -3051,7 +3031,7 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 	int *hv_slindex_ptr   = cf_malloc(hv_slindex_ptr_sz);
 
 	if ((hv_slindex_ptr == NULL) || (hv_ptr == NULL))
-		cf_crash(AS_PARTITION, "as_partition_balance: couldn't allocate partition state tables: %s", cf_strerror(errno));
+		cf_crash(AS_PARTITION, "as_partition_balance_new: couldn't allocate partition state tables: %s", cf_strerror(errno));
 
 	memset(hv_ptr, 0, hv_ptr_sz);
 	memset(hv_slindex_ptr, 0, hv_slindex_ptr_sz);
@@ -3202,7 +3182,7 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 
 			p->origin      = 0;
 			p->target      = 0;
-			p->last_outgoing_ldt_version = 0;
+			p->current_outgoing_ldt_version = 0;
 
 			/*
 			 * We are going to redo all the migrations that have not been completed based
@@ -3212,8 +3192,6 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 			 */
 			p->pending_migrate_tx = 0;
 			p->pending_migrate_rx = 0;
-			p->rxstate = AS_PARTITION_MIG_RX_STATE_NONE;
-			p->txstate = AS_PARTITION_MIG_TX_STATE_NONE;
 			memset(p->replica_tx_onsync, 0, sizeof(p->replica_tx_onsync));
 
 			/* Reinitialize duplication list */
@@ -3544,7 +3522,6 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 							* this node may or may not be a replica
 							*/
 							p->pending_migrate_rx++;
-							p->rxstate = AS_PARTITION_MIG_RX_STATE_INIT;
 							p->origin = HV(j, first_sync_node);
 							set_partition_desync_lockfree(p, &ns->partitions[j].version_info, ns, j, false);
 							cf_debug(AS_PARTITION, "{%s:%d} Master case 6c: being marked desync, expect data from %"PRIx64" and %d duplicate partitions", ns->name, j, HV(j, first_sync_node), n_dupl);
@@ -3562,7 +3539,6 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 								p->pending_migrate_rx++;
 								cf_debug(AS_PARTITION, "{%s:%d} Master: expect data from duplicate partition in node %"PRIx64"", ns->name, j, p->dupl_nodes[k]);
 							}
-							p->rxstate = AS_PARTITION_MIG_RX_STATE_INIT;
 						}
 
 						/*
@@ -3612,7 +3588,6 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 							 * Wait for the master to send data
 							 */
 							p->pending_migrate_rx++;
-							p->rxstate = AS_PARTITION_MIG_RX_STATE_INIT;
 							p->origin = HV(j, 0);
 							set_partition_desync_lockfree(p, &ns->partitions[j].version_info, ns, j, false);
 							cf_debug(AS_PARTITION, "{%s:%d} Replica case 6a: being marked desync, expect data from %"PRIx64"", ns->name, j, HV(j, 0));

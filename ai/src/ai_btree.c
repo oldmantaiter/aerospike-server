@@ -105,7 +105,8 @@ ai_btree_init(void) {
 	}
 }
 
-static dig_arr_t *
+dig_arr_t *
+//static dig_arr_t *
 getDigestArray(void)
 {
 	dig_arr_t *dt;

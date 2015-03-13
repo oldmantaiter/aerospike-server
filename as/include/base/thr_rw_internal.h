@@ -65,6 +65,7 @@
 // 2. Secondary index, to send record operation and secondary index operation in
 //    single message.
 #define RW_FIELD_MULTIOP        14
+#define RW_FIELD_LDT_VERSION    15
 
 #define RW_OP_WRITE 1
 #define RW_OP_WRITE_ACK 2
@@ -134,6 +135,13 @@ void write_local_post_processing(
 	int64_t
 	);
 
+typedef struct ldt_prole_info_s {
+	bool        replication_partition_version_match;
+	uint64_t    ldt_source_version;
+	uint64_t    ldt_prole_version;
+	bool        ldt_prole_version_set;
+} ldt_prole_info;
+
 int write_local_pickled(
 	cf_digest *,
 	as_partition_reservation *,
@@ -143,7 +151,8 @@ int write_local_pickled(
 	as_generation,
 	uint32_t,
 	cf_node,
-	uint32_t
+	uint32_t,
+	ldt_prole_info *
 	);
 
 extern bool msg_has_key(as_msg* m);

@@ -74,6 +74,7 @@
 #include "base/thr_scan.h"
 #include "base/monitor.h"
 #include "base/thr_sindex.h"
+#include "base/ldt.h"
 
 #define STR_NS             "ns"
 #define STR_SET            "set"
@@ -114,7 +115,7 @@ int as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def);
 int as_info_set_tree(char *name, as_info_get_tree_fn gv_fn);
 
 // For commands - you will be called with the parameters.
-int as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_priv required_priv);
+int as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_perm required_perm);
 
 // Acceptable timediffs in XDR lastship times.
 // (Print warning only if time went back by at least 5 minutes.)
@@ -125,6 +126,7 @@ static int as_info_queue_get_size(void);
 int as_info_parameter_get(char *param_str, char *param, char *value, int *value_len);
 int info_get_objects(char *name, cf_dyn_buf *db);
 void clear_microbenchmark_histograms();
+void clear_ldt_histograms();
 int info_get_tree_sets(char *name, char *subtree, cf_dyn_buf *db);
 int info_get_tree_bins(char *name, char *subtree, cf_dyn_buf *db);
 int info_get_tree_sindexes(char *name, char *subtree, cf_dyn_buf *db);
@@ -191,7 +193,7 @@ typedef struct info_command_s {
 	struct info_command_s *next;
 	char *name;
 	as_info_command_fn 		command_fn;
-	as_sec_priv				required_priv; // required security privilege
+	as_sec_perm				required_perm; // required security permission
 } info_command;
 
 typedef struct info_tree_s {
@@ -268,6 +270,7 @@ int
 info_get_utilization(cf_dyn_buf *db)
 {
 	uint64_t	total_number_objects    = 0;
+	uint64_t	total_number_objects_sub= 0;
 	uint64_t	used_disk_size          = 0;
 	uint64_t	total_disk_size         = 0;
 	uint64_t	total_memory_size       = 0;
@@ -282,10 +285,11 @@ info_get_utilization(cf_dyn_buf *db)
 		as_namespace *ns = g_config.namespace[i];
 
 		total_number_objects    += ns->n_objects;
+		total_number_objects_sub += ns->n_sub_objects;
 		total_disk_size         += ns->ssd_size;
 		total_memory_size       += ns->memory_size;
 		used_data_memory        += ns->n_bytes_memory;
-		used_pindex_memory      += as_index_size_get(ns) * ns->n_objects;
+		used_pindex_memory      += as_index_size_get(ns) * (ns->n_objects + ns->n_sub_objects);
 		used_sindex_memory      += cf_atomic_int_get(ns->sindex_data_memory_used);
 
 		uint64_t inuse_disk_bytes = 0;
@@ -303,6 +307,7 @@ info_get_utilization(cf_dyn_buf *db)
 
 
 	info_append_uint64("", "objects",                  total_number_objects, db);
+	info_append_uint64("", "sub-records",              total_number_objects_sub, db);
 	info_append_uint64("", "total-bytes-disk",         total_disk_size,      db);
 	info_append_uint64("", "used-bytes-disk",          used_disk_size,       db);
 	info_append_uint64("", "free-pct-disk",            disk_free_pct,        db);
@@ -412,6 +417,8 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	APPEND_STAT_COUNTER(db, g_config.stat_proxy_success);
 	cf_dyn_buf_append_string(db, ";stat_proxy_errs=");
 	APPEND_STAT_COUNTER(db, g_config.stat_proxy_errs);
+	cf_dyn_buf_append_string(db, ";stat_ldt_proxy=");
+	APPEND_STAT_COUNTER(db, g_config.ldt_proxy_initiate);
 
 	cf_dyn_buf_append_string(db,   ";stat_cluster_key_trans_to_proxy_retry=");
 	APPEND_STAT_COUNTER(db, g_config.stat_cluster_key_trans_to_proxy_retry);
@@ -696,6 +703,14 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	APPEND_STAT_COUNTER(db, g_config.err_write_fail_not_found);
 	cf_dyn_buf_append_string(db, ";err_write_fail_key_mismatch=");
 	APPEND_STAT_COUNTER(db, g_config.err_write_fail_key_mismatch);
+	cf_dyn_buf_append_string(db, ";err_write_fail_record_too_big=");
+	APPEND_STAT_COUNTER(db, g_config.err_write_fail_record_too_big);
+	cf_dyn_buf_append_string(db, ";err_write_fail_bin_name=");
+	APPEND_STAT_COUNTER(db, g_config.err_write_fail_bin_name);
+	cf_dyn_buf_append_string(db, ";err_write_fail_bin_not_found=");
+	APPEND_STAT_COUNTER(db, g_config.err_write_fail_bin_not_found);
+	cf_dyn_buf_append_string(db, ";err_write_fail_forbidden=");
+	APPEND_STAT_COUNTER(db, g_config.err_write_fail_forbidden);
 	cf_dyn_buf_append_string(db, ";stat_duplicate_operation=");
 	APPEND_STAT_COUNTER(db, g_config.stat_duplicate_operation);
 	cf_dyn_buf_append_string(db, ";uptime=");
@@ -1942,6 +1957,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.microbenchmarks ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";storage-benchmarks=");
 	cf_dyn_buf_append_string(db, g_config.storage_benchmarks ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";ldt-benchmarks=");
+	cf_dyn_buf_append_string(db, g_config.ldt_benchmarks ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";scan-priority=");
 	cf_dyn_buf_append_int(db, g_config.scan_priority);
 	cf_dyn_buf_append_string(db, ";scan-sleep=");
@@ -2006,6 +2023,11 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_int(db, g_config.prole_extra_ttl);
 	cf_dyn_buf_append_string(db, ";max-msgs-per-type=");
 	cf_dyn_buf_append_int(db, g_config.max_msgs_per_type);
+	cf_dyn_buf_append_string(db, ";service-threads=");
+	cf_dyn_buf_append_int(db, g_config.n_service_threads);
+	cf_dyn_buf_append_string(db, ";fabric-workers=");
+	cf_dyn_buf_append_int(db, g_config.n_fabric_workers);
+
 	if (g_config.pidfile) {
 		cf_dyn_buf_append_string(db, ";pidfile=");
 		cf_dyn_buf_append_string(db, g_config.pidfile);
@@ -2082,7 +2104,7 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 		return -1;
 	}
 
-	cf_dyn_buf_append_string(db, ";memory-size=");
+	cf_dyn_buf_append_string(db, "memory-size=");
 	cf_dyn_buf_append_uint64(db, ns->memory_size);
 
 	cf_dyn_buf_append_string(db, ";high-water-disk-pct=");
@@ -2117,7 +2139,7 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 		cf_dyn_buf_append_string(db, "ttl");
 	}
 	else {
-		cf_dyn_buf_append_string(db, ";undefined");
+		cf_dyn_buf_append_string(db, "undefined");
 	}
 
 	cf_dyn_buf_append_string(db, ";allow_versions=");
@@ -2126,13 +2148,16 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";single-bin=");
 	cf_dyn_buf_append_string(db, ns->single_bin ? "true" : "false");
 
+	cf_dyn_buf_append_string(db, ";ldt-enabled=");
+	cf_dyn_buf_append_string(db, ns->ldt_enabled ? "true" : "false");
+
 	cf_dyn_buf_append_string(db, ";enable-xdr=");
 	cf_dyn_buf_append_string(db, ns->enable_xdr ? "true" : "false");
 
-	cf_dyn_buf_append_string(db, "sets-enable-xdr=");
+	cf_dyn_buf_append_string(db, ";sets-enable-xdr=");
 	cf_dyn_buf_append_string(db, ns->sets_enable_xdr ? "true" : "false");
 
-	cf_dyn_buf_append_string(db, "forward-xdr-writes=");
+	cf_dyn_buf_append_string(db, ";ns-forward-xdr-writes=");
 	cf_dyn_buf_append_string(db, ns->ns_forward_xdr_writes ? "true" : "false");
 
 	cf_dyn_buf_append_string(db, ";disallow-null-setname=");
@@ -2152,6 +2177,7 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 
 		info_append_uint64("", "total-bytes-disk", ns->ssd_size, db);
 		info_append_uint64("", "defrag-lwm-pct", ns->storage_defrag_lwm_pct, db);
+		info_append_uint64("", "defrag-queue-min", ns->storage_defrag_queue_min, db);
 		info_append_uint64("", "defrag-sleep", ns->storage_defrag_sleep, db);
 		info_append_uint64("", "defrag-startup-minimum", ns->storage_defrag_startup_minimum, db);
 		info_append_uint64("", "flush-max-ms", ns->storage_flush_max_us / 1000, db);
@@ -2310,6 +2336,8 @@ info_security_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint32(db, g_config.sec_cfg.privilege_refresh_period);
 	cf_dyn_buf_append_string(db, ";report-authentication-sinks=");
 	cf_dyn_buf_append_uint32(db, g_config.sec_cfg.report.authentication);
+	cf_dyn_buf_append_string(db, ";report-data-op-sinks=");
+	cf_dyn_buf_append_uint32(db, g_config.sec_cfg.report.data_op);
 	cf_dyn_buf_append_string(db, ";report-sys-admin-sinks=");
 	cf_dyn_buf_append_uint32(db, g_config.sec_cfg.report.sys_admin);
 	cf_dyn_buf_append_string(db, ";report-user-admin-sinks=");
@@ -2521,6 +2549,19 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else
 				goto Error;
 		}
+		else if (0 == as_info_parameter_get(params, "ldt-benchmarks", context, &context_len)) {
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
+				clear_ldt_histograms();
+				cf_info(AS_INFO, "Changing value of ldt-benchmarks from %s to %s", bool_val[g_config.ldt_benchmarks], context);
+				g_config.ldt_benchmarks = true;
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
+				cf_info(AS_INFO, "Changing value of ldt-benchmarks from %s to %s", bool_val[g_config.ldt_benchmarks], context);
+				g_config.ldt_benchmarks = false;
+			}
+			else
+				goto Error;
+		}
 		else if (0 == as_info_parameter_get(params, "scan-priority", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
@@ -2618,7 +2659,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			g_config.migrate_xmit_lwm = val;
 		}
 		else if (0 == as_info_parameter_get(params, "migrate-max-num-incoming", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val) || (0 >= val))
+			if (0 != cf_str_atoi(context, &val) || (0 > val))
 				goto Error;
 			cf_info(AS_INFO, "Changing value of migrate-max-num-incoming from %d to %d ", g_config.migrate_max_num_incoming, val);
 			g_config.migrate_max_num_incoming = val;
@@ -3247,6 +3288,18 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				goto Error;
 			}
 		}
+		else if (0 == as_info_parameter_get(params, "ldt-gc-rate", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val)) {
+				goto Error;
+			}
+			uint64_t rate = (uint64_t)val;
+
+			if ((rate == 0) || (rate > LDT_SUB_GC_MAX_RATE)) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of ldt-gc-rate of ns %s from %lu to %d", ns->name, (1000 * 1000)/ns->ldt_gc_sleep_us , val);
+			ns->ldt_gc_sleep_us = 1000 * 1000 / rate;
+		}
 		else if (0 == as_info_parameter_get(params, "defrag-lwm-pct", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val)) {
 				goto Error;
@@ -3254,6 +3307,13 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of defrag-lwm-pct of ns %s from %d to %d ", ns->name, ns->storage_defrag_lwm_pct, val);
 			ns->storage_defrag_lwm_pct = val;
 			ns->defrag_lwm_size = (ns->storage_write_block_size * ns->storage_defrag_lwm_pct) / 100;
+		}
+		else if (0 == as_info_parameter_get(params, "defrag-queue-min", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val)) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of defrag-queue-min of ns %s from %u to %d", ns->name, ns->storage_defrag_queue_min, val);
+			ns->storage_defrag_queue_min = (uint32_t)val;
 		}
 		else if (0 == as_info_parameter_get(params, "defrag-sleep", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val)) {
@@ -3872,7 +3932,7 @@ info_command_hist_track(char *name, char *params, cf_dyn_buf *db)
 
 // Error strings for security check results.
 static void
-append_sec_err_str(cf_dyn_buf *db, uint32_t result, as_sec_priv cmd_priv) {
+append_sec_err_str(cf_dyn_buf *db, uint32_t result, as_sec_perm cmd_perm) {
 	switch (result) {
 	case AS_SEC_ERR_NOT_AUTHENTICATED:
 		cf_dyn_buf_append_string(db, "ERROR:");
@@ -3880,11 +3940,11 @@ append_sec_err_str(cf_dyn_buf *db, uint32_t result, as_sec_priv cmd_priv) {
 		cf_dyn_buf_append_string(db, ":not authenticated");
 		return;
 	case AS_SEC_ERR_ROLE_VIOLATION:
-		switch (cmd_priv) {
-		case PRIV_INDEX_MANAGE:
+		switch (cmd_perm) {
+		case PERM_INDEX_MANAGE:
 			INFO_COMMAND_SINDEX_FAILCODE(result, "role violation");
 			return;
-		case PRIV_UDF_MANAGE:
+		case PERM_UDF_MANAGE:
 			cf_dyn_buf_append_string(db, "error=role_violation");
 			return;
 		default:
@@ -3916,11 +3976,11 @@ info_command	*command_head = 0;
 int
 info_all(const as_file_handle* fd_h, cf_dyn_buf *db)
 {
-	uint8_t auth_result = as_security_check(fd_h, PRIV_NONE);
+	uint8_t auth_result = as_security_check(fd_h, PERM_NONE);
 
 	if (auth_result != AS_PROTO_RESULT_OK) {
-		as_security_log(fd_h, auth_result, PRIV_NONE, "info-all request", NULL);
-		append_sec_err_str(db, auth_result, PRIV_NONE);
+		as_security_log(fd_h, auth_result, PERM_NONE, "info-all request", NULL);
+		append_sec_err_str(db, auth_result, PERM_NONE);
 		cf_dyn_buf_append_char(db, EOL);
 		return 0;
 	}
@@ -3958,12 +4018,12 @@ info_all(const as_file_handle* fd_h, cf_dyn_buf *db)
 int
 info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
 {
-	uint8_t auth_result = as_security_check(fd_h, PRIV_NONE);
+	uint8_t auth_result = as_security_check(fd_h, PERM_NONE);
 
 	if (auth_result != AS_PROTO_RESULT_OK) {
 		// TODO - log null-terminated buf as detail?
-		as_security_log(fd_h, auth_result, PRIV_NONE, "info request", NULL);
-		append_sec_err_str(db, auth_result, PRIV_NONE);
+		as_security_log(fd_h, auth_result, PERM_NONE, "info request", NULL);
+		append_sec_err_str(db, auth_result, PERM_NONE);
 		cf_dyn_buf_append_char(db, EOL);
 		return 0;
 	}
@@ -4061,15 +4121,15 @@ info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
 					cf_dyn_buf_append_string( db, param);
 					cf_dyn_buf_append_char( db, SEP );
 
-					uint8_t result = as_security_check(fd_h, cmd->required_priv);
+					uint8_t result = as_security_check(fd_h, cmd->required_perm);
 
-					as_security_log(fd_h, result, cmd->required_priv, name, param);
+					as_security_log(fd_h, result, cmd->required_perm, name, param);
 
 					if (result == AS_PROTO_RESULT_OK) {
 						cmd->command_fn(cmd->name, param, db);
 					}
 					else {
-						append_sec_err_str(db, result, cmd->required_priv);
+						append_sec_err_str(db, result, cmd->required_perm);
 					}
 
 					cf_dyn_buf_append_char( db, EOL );
@@ -4329,7 +4389,7 @@ Cleanup:
 // This function only does the registration!
 
 int
-as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_priv required_priv)
+as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_perm required_perm)
 {
 	int rv = -1;
 	pthread_mutex_lock(&g_info_lock);
@@ -4353,7 +4413,7 @@ as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_priv requi
 			goto Cleanup;
 		}
 		e->command_fn = command_fn;
-		e->required_priv = required_priv;
+		e->required_perm = required_perm;
 		e->next = command_head;
 		command_head = e;
 	}
@@ -4519,11 +4579,12 @@ info_debug_ticker_fn(void *gcc_is_ass)
 					(swapping == true) ? "SWAPPING!" : ""
 					);
 
-			cf_info(AS_INFO, " migrates in progress ( %d , %d ) ::: ClusterSize %zd ::: objects %"PRIu64,
+			cf_info(AS_INFO, " migrates in progress ( %d , %d ) ::: ClusterSize %zd ::: objects %"PRIu64" ::: sub_objects %"PRIu64,
 					cf_atomic32_get(g_config.migrate_progress_send),
 					cf_atomic32_get(g_config.migrate_progress_recv),
 					g_config.paxos->cluster_size,  // add real cluster size when srini has it
-					thr_info_get_object_count()
+					thr_info_get_object_count(),
+					thr_info_get_subobject_count()
 					);
 			cf_info(AS_INFO, " rec refs %"PRIu64" ::: rec locks %"PRIu64" ::: trees %"PRIu64" ::: wr reqs %"PRIu64" ::: mig tx %"PRIu64" ::: mig rx %"PRIu64"",
 					cf_atomic_int_get(g_config.global_record_ref_count),
@@ -4566,7 +4627,7 @@ info_debug_ticker_fn(void *gcc_is_ass)
 					cf_atomic_int_get(g_config.rw_tree_count)
 					);
 
-			// namespace disk and memory size
+			// namespace disk and memory size and ldt gc stats
 			total_ns_memory_inuse = 0;
 			for (int i = 0; i < g_config.namespaces; i++) {
 				as_namespace *ns = g_config.namespace[i];
@@ -4581,6 +4642,16 @@ info_debug_ticker_fn(void *gcc_is_ass)
 							ns->name, inuse_disk_bytes, ns_memory_inuse,
 							ns->sindex_data_memory_used,
 							available_pct);
+					if (ns->ldt_enabled) {
+						uint64_t cnt              = cf_atomic_int_get(ns->lstats.ldt_gc_processed);
+						uint64_t io               = cf_atomic_int_get(ns->lstats.ldt_gc_io);
+						uint64_t gc               = cf_atomic_int_get(ns->lstats.ldt_gc_cnt);
+						uint64_t no_esr           = cf_atomic_int_get(ns->lstats.ldt_gc_no_esr_cnt);
+						uint64_t no_parent        = cf_atomic_int_get(ns->lstats.ldt_gc_no_parent_cnt);
+						uint64_t version_mismatch = cf_atomic_int_get(ns->lstats.ldt_gc_parent_version_mismatch_cnt);
+						cf_info(AS_INFO, "namespace %s: ldt_gc: cnt %"PRIu64" io %"PRIu64" gc %"PRIu64" (%"PRIu64", %"PRIu64", %"PRIu64")",
+								ns->name, cnt, io, gc, no_esr, no_parent, version_mismatch);
+					}
 				}
 				else {
 					uint32_t n_reads_from_cache = cf_atomic32_get(ns->n_reads_from_cache);
@@ -4596,6 +4667,16 @@ info_debug_ticker_fn(void *gcc_is_ass)
 							ns->sindex_data_memory_used,
 							available_pct,
 							ns->cache_read_pct);
+					if (ns->ldt_enabled) {
+						uint64_t cnt              = cf_atomic_int_get(ns->lstats.ldt_gc_processed);
+						uint64_t io               = cf_atomic_int_get(ns->lstats.ldt_gc_io);
+						uint64_t gc               = cf_atomic_int_get(ns->lstats.ldt_gc_cnt);
+						uint64_t no_esr           = cf_atomic_int_get(ns->lstats.ldt_gc_no_esr_cnt);
+						uint64_t no_parent        = cf_atomic_int_get(ns->lstats.ldt_gc_no_parent_cnt);
+						uint64_t version_mismatch = cf_atomic_int_get(ns->lstats.ldt_gc_parent_version_mismatch_cnt);
+						cf_info(AS_INFO, "namespace %s: ldt_gc: cnt %"PRIu64" io %"PRIu64" gc %"PRIu64" (%"PRIu64", %"PRIu64", %"PRIu64")",
+								ns->name, cnt, io, gc, no_esr, no_parent, version_mismatch);
+					}
 				}
 
 				total_ns_memory_inuse += ns_memory_inuse;
@@ -4692,6 +4773,13 @@ info_debug_ticker_fn(void *gcc_is_ass)
 				as_storage_ticker_stats();
 			}
 
+			if (g_config.ldt_benchmarks) {
+				histogram_dump(g_config.ldt_multiop_prole_hist);
+				histogram_dump(g_config.ldt_update_record_cnt_hist);
+				histogram_dump(g_config.ldt_io_record_cnt_hist);
+				histogram_dump(g_config.ldt_update_io_bytes_hist);
+				histogram_dump(g_config.ldt_hist);
+			}
 #ifdef HISTOGRAM_OBJECT_LATENCY
 			if (g_config.read0_hist)
 				histogram_dump(g_config.read0_hist);
@@ -5427,6 +5515,19 @@ thr_info_get_object_count()
 	return objects;
 }
 
+uint64_t
+thr_info_get_subobject_count()
+{
+	uint64_t sub_objects = 0;
+
+	for (uint i = 0; i < g_config.namespaces; i++) {
+		sub_objects += g_config.namespace[i]->n_sub_objects;
+	}
+
+	return sub_objects;
+}
+
+
 void
 info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 {
@@ -5441,12 +5542,17 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 
 	// what everyone wants to know: the number of objects and size
 	info_append_uint64("", "objects",  ns->n_objects, db);
+	info_append_uint64("", "sub-objects",  ns->n_sub_objects, db);
 	info_append_uint64("", "master-objects", mp.n_master_records, db);
+	info_append_uint64("", "master-sub-objects", mp.n_master_sub_records, db);
 	info_append_uint64("", "prole-objects", mp.n_prole_records, db);
+	info_append_uint64("", "prole-sub-objects", mp.n_prole_sub_records, db);
 	info_append_uint64("", "expired-objects",  ns->n_expired_objects, db);
 	info_append_uint64("", "evicted-objects",  ns->n_evicted_objects, db);
 	info_append_uint64("", "set-deleted-objects", ns->n_deleted_set_objects, db);
 	info_append_uint64("", "set-evicted-objects", ns->n_evicted_set_objects, db);
+	info_append_uint64("", "nsup-cycle-duration", (uint64_t)ns->nsup_cycle_duration, db);
+	info_append_uint64("", "nsup-cycle-sleep-pct", (uint64_t)ns->nsup_cycle_sleep_pct, db);
 
 	// total used memory =  data memory + primary index memory + secondary index memory
 	data_memory   = ns->n_bytes_memory;
@@ -5481,22 +5587,83 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 	}
 
 	// LDT operational statistics
-	cf_dyn_buf_append_string(db, ";ldt_reads=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_read_reqs));
-	cf_dyn_buf_append_string(db, ";ldt_read_success=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_read_success));
-	cf_dyn_buf_append_string(db, ";ldt_deletes=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_delete_reqs));
-	cf_dyn_buf_append_string(db, ";ldt_delete_success=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_delete_success));
-	cf_dyn_buf_append_string(db, ";ldt_writes=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_write_reqs));
-	cf_dyn_buf_append_string(db, ";ldt_write_success=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_write_success));
-	cf_dyn_buf_append_string(db, ";ldt_updates=");
-	cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->ldt_update_reqs));
-	cf_dyn_buf_append_string(db, ";ldt_errors=");
-	cf_dyn_buf_append_uint32(db, ns->ldt_errs);
+	//
+	// print only if LDT is enabled
+	if (ns->ldt_enabled) {	
+		cf_dyn_buf_append_string(db, ";ldt-reads=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_read_reqs));
+		cf_dyn_buf_append_string(db, ";ldt-read-success=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_read_success));
+		cf_dyn_buf_append_string(db, ";ldt-deletes=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_delete_reqs));
+		cf_dyn_buf_append_string(db, ";ldt-delete-success=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_delete_success));
+		cf_dyn_buf_append_string(db, ";ldt-writes=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_write_reqs));
+		cf_dyn_buf_append_string(db, ";ldt-write-success=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_write_success));
+		cf_dyn_buf_append_string(db, ";ldt-updates=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_update_reqs));
+
+		cf_dyn_buf_append_string(db, ";ldt-gc-io=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_gc_io));
+		cf_dyn_buf_append_string(db, ";ldt-gc-cnt=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_gc_cnt));
+		cf_dyn_buf_append_string(db, ";ldt-randomizer-retry=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_randomizer_retry));
+
+		cf_dyn_buf_append_string(db, ";ldt-errors=");
+		cf_dyn_buf_append_uint32(db, ns->lstats.ldt_errs);
+
+		cf_dyn_buf_append_string(db, ";ldt-err-toprec-notfound=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_toprec_not_found));
+		cf_dyn_buf_append_string(db, ";ldt-err-item-notfound=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_item_not_found));
+
+		cf_dyn_buf_append_string(db, ";ldt-err-internal=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_internal));
+		cf_dyn_buf_append_string(db, ";ldt-err-unique-key-violation=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_unique_key_violation));
+
+		cf_dyn_buf_append_string(db, ";ldt-err-insert-fail=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_insert_fail));
+		cf_dyn_buf_append_string(db, ";ldt-err-delete-fail=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_delete_fail));
+		cf_dyn_buf_append_string(db, ";ldt-err-search-fail=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_search_fail));
+		cf_dyn_buf_append_string(db, ";ldt-err-version-mismatch=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_version_mismatch));
+
+
+		cf_dyn_buf_append_string(db, ";ldt-err-capacity-exceeded=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_capacity_exceeded));
+		cf_dyn_buf_append_string(db, ";ldt-err-param=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_param));
+
+		cf_dyn_buf_append_string(db, ";ldt-err-op-bintype-mismatch=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_op_bintype_mismatch));
+		cf_dyn_buf_append_string(db, ";ldt-err-too-many-open-subrec=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_too_many_open_subrec));
+
+		cf_dyn_buf_append_string(db, ";ldt-err-subrec-not-found=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_subrec_not_found));
+		cf_dyn_buf_append_string(db, ";ldt-err-bin-does-not-exist=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_bin_does_not_exist));
+		cf_dyn_buf_append_string(db, ";ldt-err-bin-exits=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_bin_exits));
+		cf_dyn_buf_append_string(db, ";ldt-err-bin-damaged=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_bin_damaged));
+
+		cf_dyn_buf_append_string(db, ";ldt-err-toprec-internal=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_toprec_internal));
+		cf_dyn_buf_append_string(db, ";ldt-err-subrec-internal=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_subrec_internal));
+		cf_dyn_buf_append_string(db, ";ldt-err-transform-internal=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_transform_internal));
+		cf_dyn_buf_append_string(db, ";ldt-err-unknown=");
+		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_err_unknown));
+	}
+
 
 	// if storage, lots of information about the storage
 	//
@@ -5552,8 +5719,6 @@ info_get_tree_namespace(char *name, char *subtree, cf_dyn_buf *db)
 
 	info_get_namespace_info(ns, db);
 	cf_dyn_buf_append_string(db, ";");
-	char param[1024];
-	sprintf(param, ";id=%s", ns->name);
 	info_namespace_config_get(ns->name, db);
 
 Done:
@@ -5768,10 +5933,21 @@ info_get_tree_sindexes(char *name, char *subtree, cf_dyn_buf *db)
 int
 info_get_service(char *name, cf_dyn_buf *db)
 {
-
-	cf_dyn_buf_append_string(db, g_service_str );
+	pthread_mutex_lock(&g_service_lock);
+	cf_dyn_buf_append_string(db, g_service_str ? g_service_str : " ");
+	pthread_mutex_unlock(&g_service_lock);
 
 	return(0);
+}
+
+void
+clear_ldt_histograms()
+{
+	histogram_clear(g_config.ldt_multiop_prole_hist);
+	histogram_clear(g_config.ldt_update_record_cnt_hist);
+	histogram_clear(g_config.ldt_io_record_cnt_hist);
+	histogram_clear(g_config.ldt_update_io_bytes_hist);
+	histogram_clear(g_config.ldt_hist);
 }
 
 void
@@ -6794,73 +6970,74 @@ as_info_init()
 	as_info_set_tree("sets", info_get_tree_sets);           // Returns set statistics for all or a particular set.
 
 	// Define commands
-	as_info_set_command("alloc-info", info_command_alloc_info, PRIV_NONE);                    // Lookup a memory allocation by program location.
-	as_info_set_command("asm", info_command_asm, PRIV_SERVICE_CTRL);                          // Control the operation of the ASMalloc library.
-	as_info_set_command("config-get", info_command_config_get, PRIV_NONE);                    // Returns running config for specified context.
-	as_info_set_command("config-set", info_command_config_set, PRIV_SET_CONFIG);              // Set a configuration parameter at run time, configuration parameter must be dynamic.
-	as_info_set_command("dump-fabric", info_command_dump_fabric, PRIV_LOGGING_CTRL);          // Print debug information about fabric to the log file.
-	as_info_set_command("dump-hb", info_command_dump_hb, PRIV_LOGGING_CTRL);                  // Print debug information about heartbeat state to the log file.
-	as_info_set_command("dump-migrates", info_command_dump_migrates, PRIV_LOGGING_CTRL);      // Print debug information about migration.
-	as_info_set_command("dump-msgs", info_command_dump_msgs, PRIV_LOGGING_CTRL);              // Print debug information about existing 'msg' objects and queues to the log file.
-	as_info_set_command("dump-paxos", info_command_dump_paxos, PRIV_LOGGING_CTRL);            // Print debug information about Paxos state to the log file.
-	as_info_set_command("dump-ra", info_command_dump_ra, PRIV_LOGGING_CTRL);                  // Print debug information about Rack Aware state.
-	as_info_set_command("dump-smd", info_command_dump_smd, PRIV_LOGGING_CTRL);                // Print information about System Metadata (SMD) to the log file.
-	as_info_set_command("dump-wb", info_command_dump_wb, PRIV_LOGGING_CTRL);                  // Print debug information about Write Bocks (WB) to the log file.
-	as_info_set_command("dump-wb-summary", info_command_dump_wb_summary, PRIV_LOGGING_CTRL);  // Print summary information about all Write Blocks (WB) on a device to the log file.
-	as_info_set_command("dump-wr", info_command_dump_wr, PRIV_LOGGING_CTRL);                  // Print debug information about transaction hash table to the log file.
-	as_info_set_command("dun", info_command_dun, PRIV_SERVICE_CTRL);                          // Instruct this server to ignore another node.
-	as_info_set_command("get-config", info_command_config_get, PRIV_NONE);                    // Returns running config for all or a particular context.
-	as_info_set_command("get-sl", info_command_get_sl, PRIV_NONE);                            // Get the Paxos succession list.
-	as_info_set_command("hist-dump", info_command_hist_dump, PRIV_NONE);                      // Returns a histogram snapshot for a particular histogram.
-	as_info_set_command("hist-track-start", info_command_hist_track, PRIV_SERVICE_CTRL);      // Start or Restart histogram tracking.
-	as_info_set_command("hist-track-stop", info_command_hist_track, PRIV_SERVICE_CTRL);       // Stop histogram tracking.
-	as_info_set_command("jem-stats", info_command_jem_stats, PRIV_LOGGING_CTRL);              // Print JEMalloc statistics to the log file.
-	as_info_set_command("latency", info_command_hist_track, PRIV_NONE);                       // Returns latency and throughput information.
-	as_info_set_command("log-set", info_command_log_set, PRIV_LOGGING_CTRL);                  // Set values in the log system.
-	as_info_set_command("mem", info_command_mem, PRIV_NONE);                                  // Report on memory usage.
-	as_info_set_command("mstats", info_command_mstats, PRIV_LOGGING_CTRL);                    // Dump GLibC-level memory stats.
-	as_info_set_command("mtrace", info_command_mtrace, PRIV_SERVICE_CTRL);                    // Control GLibC-level memory tracing.
-	as_info_set_command("set-config", info_command_config_set, PRIV_SET_CONFIG);              // Set config values.
-	as_info_set_command("set-log", info_command_log_set, PRIV_LOGGING_CTRL);                  // Set values in the log system.
-	as_info_set_command("set-sl", info_command_set_sl, PRIV_SERVICE_CTRL);                    // Set the Paxos succession list.
-	as_info_set_command("show-devices", info_command_show_devices, PRIV_LOGGING_CTRL);        // Print snapshot of wblocks to the log file.
-	as_info_set_command("smd", info_command_smd_cmd, PRIV_SERVICE_CTRL);                      // Manipulate the System Metadata.
-	as_info_set_command("snub", info_command_snub, PRIV_SERVICE_CTRL);                        // Ignore heartbeats from a node for a specified amount of time.
-	as_info_set_command("throughput", info_command_hist_track, PRIV_NONE);                    // Returns throughput info.
-	as_info_set_command("tip", info_command_tip, PRIV_SERVICE_CTRL);                          // Add external IP to mesh-mode heartbeats.
-	as_info_set_command("tip-clear", info_command_tip_clear, PRIV_SERVICE_CTRL);              // Clear tip list from mesh-mode heartbeats.
-	as_info_set_command("undun", info_command_undun, PRIV_SERVICE_CTRL);                      // Instruct this server to not ignore another node.
-	as_info_set_command("xdr-min-lastshipinfo", info_command_get_min_config, PRIV_NONE);      // Get the min XDR lastshipinfo.
+	as_info_set_command("alloc-info", info_command_alloc_info, PERM_NONE);                    // Lookup a memory allocation by program location.
+	as_info_set_command("asm", info_command_asm, PERM_SERVICE_CTRL);                          // Control the operation of the ASMalloc library.
+	as_info_set_command("config-get", info_command_config_get, PERM_NONE);                    // Returns running config for specified context.
+	as_info_set_command("config-set", info_command_config_set, PERM_SET_CONFIG);              // Set a configuration parameter at run time, configuration parameter must be dynamic.
+	as_info_set_command("dump-fabric", info_command_dump_fabric, PERM_LOGGING_CTRL);          // Print debug information about fabric to the log file.
+	as_info_set_command("dump-hb", info_command_dump_hb, PERM_LOGGING_CTRL);                  // Print debug information about heartbeat state to the log file.
+	as_info_set_command("dump-migrates", info_command_dump_migrates, PERM_LOGGING_CTRL);      // Print debug information about migration.
+	as_info_set_command("dump-msgs", info_command_dump_msgs, PERM_LOGGING_CTRL);              // Print debug information about existing 'msg' objects and queues to the log file.
+	as_info_set_command("dump-paxos", info_command_dump_paxos, PERM_LOGGING_CTRL);            // Print debug information about Paxos state to the log file.
+	as_info_set_command("dump-ra", info_command_dump_ra, PERM_LOGGING_CTRL);                  // Print debug information about Rack Aware state.
+	as_info_set_command("dump-smd", info_command_dump_smd, PERM_LOGGING_CTRL);                // Print information about System Metadata (SMD) to the log file.
+	as_info_set_command("dump-wb", info_command_dump_wb, PERM_LOGGING_CTRL);                  // Print debug information about Write Bocks (WB) to the log file.
+	as_info_set_command("dump-wb-summary", info_command_dump_wb_summary, PERM_LOGGING_CTRL);  // Print summary information about all Write Blocks (WB) on a device to the log file.
+	as_info_set_command("dump-wr", info_command_dump_wr, PERM_LOGGING_CTRL);                  // Print debug information about transaction hash table to the log file.
+	as_info_set_command("dun", info_command_dun, PERM_SERVICE_CTRL);                          // Instruct this server to ignore another node.
+	as_info_set_command("get-config", info_command_config_get, PERM_NONE);                    // Returns running config for all or a particular context.
+	as_info_set_command("get-sl", info_command_get_sl, PERM_NONE);                            // Get the Paxos succession list.
+	as_info_set_command("hist-dump", info_command_hist_dump, PERM_NONE);                      // Returns a histogram snapshot for a particular histogram.
+	as_info_set_command("hist-track-start", info_command_hist_track, PERM_SERVICE_CTRL);      // Start or Restart histogram tracking.
+	as_info_set_command("hist-track-stop", info_command_hist_track, PERM_SERVICE_CTRL);       // Stop histogram tracking.
+	as_info_set_command("jem-stats", info_command_jem_stats, PERM_LOGGING_CTRL);              // Print JEMalloc statistics to the log file.
+	as_info_set_command("latency", info_command_hist_track, PERM_NONE);                       // Returns latency and throughput information.
+	as_info_set_command("log-set", info_command_log_set, PERM_LOGGING_CTRL);                  // Set values in the log system.
+	as_info_set_command("mem", info_command_mem, PERM_NONE);                                  // Report on memory usage.
+	as_info_set_command("mstats", info_command_mstats, PERM_LOGGING_CTRL);                    // Dump GLibC-level memory stats.
+	as_info_set_command("mtrace", info_command_mtrace, PERM_SERVICE_CTRL);                    // Control GLibC-level memory tracing.
+	as_info_set_command("set-config", info_command_config_set, PERM_SET_CONFIG);              // Set config values.
+	as_info_set_command("set-log", info_command_log_set, PERM_LOGGING_CTRL);                  // Set values in the log system.
+	as_info_set_command("set-sl", info_command_set_sl, PERM_SERVICE_CTRL);                    // Set the Paxos succession list.
+	as_info_set_command("show-devices", info_command_show_devices, PERM_LOGGING_CTRL);        // Print snapshot of wblocks to the log file.
+	as_info_set_command("smd", info_command_smd_cmd, PERM_SERVICE_CTRL);                      // Manipulate the System Metadata.
+	as_info_set_command("snub", info_command_snub, PERM_SERVICE_CTRL);                        // Ignore heartbeats from a node for a specified amount of time.
+	as_info_set_command("throughput", info_command_hist_track, PERM_NONE);                    // Returns throughput info.
+	as_info_set_command("tip", info_command_tip, PERM_SERVICE_CTRL);                          // Add external IP to mesh-mode heartbeats.
+	as_info_set_command("tip-clear", info_command_tip_clear, PERM_SERVICE_CTRL);              // Clear tip list from mesh-mode heartbeats.
+	as_info_set_command("undun", info_command_undun, PERM_SERVICE_CTRL);                      // Instruct this server to not ignore another node.
+	as_info_set_command("xdr-min-lastshipinfo", info_command_get_min_config, PERM_NONE);      // Get the min XDR lastshipinfo.
 
 	// SINDEX
 	as_info_set_dynamic("sindex", info_get_sindexes, false);
 	as_info_set_tree("sindex", info_get_tree_sindexes);
-	as_info_set_command("sindex-create", info_command_sindex_create, PRIV_INDEX_MANAGE);  // Create a secondary index.
-	as_info_set_command("sindex-delete", info_command_sindex_delete, PRIV_INDEX_MANAGE);  // Delete a secondary index.
+	as_info_set_command("sindex-create", info_command_sindex_create, PERM_INDEX_MANAGE);  // Create a secondary index.
+	as_info_set_command("sindex-delete", info_command_sindex_delete, PERM_INDEX_MANAGE);  // Delete a secondary index.
 
 	// UDF
 	as_info_set_dynamic("udf-list", udf_cask_info_list, false);
-	as_info_set_command("udf-put", udf_cask_info_put, PRIV_UDF_MANAGE);
-	as_info_set_command("udf-get", udf_cask_info_get, PRIV_NONE);
-	as_info_set_command("udf-remove", udf_cask_info_remove, PRIV_UDF_MANAGE);
+	as_info_set_command("udf-put", udf_cask_info_put, PERM_UDF_MANAGE);
+	as_info_set_command("udf-get", udf_cask_info_get, PERM_NONE);
+	as_info_set_command("udf-remove", udf_cask_info_remove, PERM_UDF_MANAGE);
+	as_info_set_command("udf-clear-cache", udf_cask_info_clear_cache, PERM_UDF_MANAGE);
 
 	// JOBS
-	as_info_set_command("jobs", info_command_mon_cmd, PRIV_SERVICE_CTRL);  // Manipulate the multi-key lookup monitoring infrastructure.
+	as_info_set_command("jobs", info_command_mon_cmd, PERM_SERVICE_CTRL);  // Manipulate the multi-key lookup monitoring infrastructure.
 
 	// Undocumented Secondary Index Command
-	as_info_set_command("sindex-histogram", info_command_sindex_histogram, PRIV_SERVICE_CTRL);
-	as_info_set_command("sindex-repair", info_command_sindex_repair, PRIV_SERVICE_CTRL);
-	as_info_set_command("sindex-dump", info_command_sindex_dump, PRIV_SERVICE_CTRL);  // Dumps to a file, not log.
-	as_info_set_command("sindex-qnodemap", info_command_sindex_qnodemap, PRIV_NONE);
+	as_info_set_command("sindex-histogram", info_command_sindex_histogram, PERM_SERVICE_CTRL);
+	as_info_set_command("sindex-repair", info_command_sindex_repair, PERM_SERVICE_CTRL);
+	as_info_set_command("sindex-dump", info_command_sindex_dump, PERM_SERVICE_CTRL);  // Dumps to a file, not log.
+	as_info_set_command("sindex-qnodemap", info_command_sindex_qnodemap, PERM_NONE);
 
 	as_info_set_dynamic("query-list", as_query_list, false);
-	as_info_set_command("query-kill", info_command_query_kill, PRIV_SERVICE_CTRL);
+	as_info_set_command("query-kill", info_command_query_kill, PERM_SERVICE_CTRL);
 	as_info_set_dynamic("query-stat", as_query_stat, false);
-	as_info_set_command("scan-abort", info_command_abort_scan, PRIV_SERVICE_CTRL);  // Abort a tscan with a given id.
+	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SERVICE_CTRL);  // Abort a tscan with a given id.
 	as_info_set_dynamic("scan-list", as_tscan_list, false);                         // List job ids of all scans.
-	as_info_set_command("sindex-describe", info_command_sindex_describe, PRIV_NONE);
-	as_info_set_command("sindex-stat", info_command_sindex_stat, PRIV_NONE);
-	as_info_set_command("sindex-list", info_command_sindex_list, PRIV_NONE);
+	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
+	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
+	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
 
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.

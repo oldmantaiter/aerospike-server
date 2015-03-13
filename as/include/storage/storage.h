@@ -72,6 +72,8 @@ typedef enum {
 	AS_STORAGE_ENGINE_KV		= 3
 } as_storage_type;
 
+#define NAMESPACE_HAS_PERSISTENCE(ns) \
+	(ns->storage_type != AS_STORAGE_ENGINE_MEMORY) 
 // For sizing the storage API "v-tables".
 #define AS_STORAGE_ENGINE_TYPES 4
 

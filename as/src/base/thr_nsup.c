@@ -94,7 +94,7 @@ void_time_to_ttl(uint32_t void_time, uint32_t now)
 // for convenient comparison to run-time eviction.
 //
 
-#define NUM_EVICT_THREADS 16
+#define NUM_EVICT_THREADS 24
 #define EVAL_WRITE_STATE_FREQUENCY 1024
 
 
@@ -1129,6 +1129,11 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 
 	ns->non_expirable_objects = n_0_void_time;
 
+	uint64_t total_duration_ms = cf_getms() - start_ms;
+
+	ns->nsup_cycle_duration = (uint32_t)(total_duration_ms / 1000);
+	ns->nsup_cycle_sleep_pct = (uint32_t)((n_general_waits * 100) / total_duration_ms);
+
 	cf_info(AS_NSUP, "{%s} Records: %"PRIu64", %"PRIu64" 0-vt, %"
 			PRIu64"(%"PRIu64") expired, %"PRIu64"(%"PRIu64") evicted, %"
 			PRIu64"(%"PRIu64") set deletes, %"PRIu64"(%"PRIu64") set evicted. "
@@ -1136,7 +1141,7 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 			ns->name, n_master, n_0_void_time,
 			n_expired_records, ns->n_expired_objects, n_evicted_records, ns->n_evicted_objects,
 			n_deleted_set_records, ns->n_deleted_set_objects, n_evicted_set_records, ns->n_evicted_set_objects,
-			evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct, n_set_waits, n_clear_waits, n_general_waits, cf_getms() - start_ms);
+			evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct, n_set_waits, n_clear_waits, n_general_waits, total_duration_ms);
 }
 
 //------------------------------------------------

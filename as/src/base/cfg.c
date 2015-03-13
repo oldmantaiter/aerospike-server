@@ -52,6 +52,7 @@
 
 #include "base/cluster_config.h"
 #include "base/datamodel.h"
+#include "base/ldt.h"
 #include "base/proto.h"
 #include "base/secondary_index.h"
 #include "base/security_config.h"
@@ -111,6 +112,7 @@ cfg_set_defaults()
 	c->hist_track_back = 1800;
 	c->hist_track_slice = 10;
 	c->n_info_threads = 16;
+	c->ldt_benchmarks = false;
 	c->microbenchmarks = false;
 	c->migrate_max_num_incoming = AS_MIGRATE_DEFAULT_MAX_NUM_INCOMING; // for receiver-side migration flow-control
 	c->migrate_read_priority = 10; // # of rows between a quick context switch? not a great way to tune
@@ -260,6 +262,7 @@ typedef enum {
 	CASE_SERVICE_HIST_TRACK_SLICE,
 	CASE_SERVICE_HIST_TRACK_THRESHOLDS,
 	CASE_SERVICE_INFO_THREADS,
+	CASE_SERVICE_LDT_BENCHMARKS,
 	CASE_SERVICE_MICROBENCHMARKS,
 	CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING,
 	CASE_SERVICE_MIGRATE_READ_PRIORITY,
@@ -432,6 +435,7 @@ typedef enum {
 	CASE_NAMESPACE_HIGH_WATER_DISK_PCT,
 	CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT,
 	CASE_NAMESPACE_LDT_ENABLED,
+	CASE_NAMESPACE_LDT_GC_RATE,
 	CASE_NAMESPACE_MAX_TTL,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
@@ -479,6 +483,7 @@ typedef enum {
 	// Normally hidden:
 	CASE_NAMESPACE_STORAGE_DEVICE_COLD_START_EMPTY,
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_LWM_PCT,
+	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_QUEUE_MIN,
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_SLEEP,
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_STARTUP_MINIMUM,
 	CASE_NAMESPACE_STORAGE_DEVICE_DISABLE_ODIRECT,
@@ -553,6 +558,7 @@ typedef enum {
 
 	// Security (Aerospike) log options:
 	CASE_SECURITY_LOG_REPORT_AUTHENTICATION,
+	CASE_SECURITY_LOG_REPORT_DATA_OP,
 	CASE_SECURITY_LOG_REPORT_SYS_ADMIN,
 	CASE_SECURITY_LOG_REPORT_USER_ADMIN,
 	CASE_SECURITY_LOG_REPORT_VIOLATION,
@@ -560,6 +566,7 @@ typedef enum {
 	// Security syslog options:
 	CASE_SECURITY_SYSLOG_LOCAL,
 	CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION,
+	CASE_SECURITY_SYSLOG_REPORT_DATA_OP,
 	CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN,
 	CASE_SECURITY_SYSLOG_REPORT_USER_ADMIN,
 	CASE_SECURITY_SYSLOG_REPORT_VIOLATION
@@ -615,6 +622,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "hist-track-slice",				CASE_SERVICE_HIST_TRACK_SLICE },
 		{ "hist-track-thresholds",			CASE_SERVICE_HIST_TRACK_THRESHOLDS },
 		{ "info-threads",					CASE_SERVICE_INFO_THREADS },
+		{ "ldt-benchmarks",					CASE_SERVICE_LDT_BENCHMARKS },
 		{ "microbenchmarks",				CASE_SERVICE_MICROBENCHMARKS },
 		{ "migrate-max-num-incoming",		CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING },
 		{ "migrate-read-priority",			CASE_SERVICE_MIGRATE_READ_PRIORITY },
@@ -790,6 +798,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "high-water-disk-pct",			CASE_NAMESPACE_HIGH_WATER_DISK_PCT },
 		{ "high-water-memory-pct",			CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT },
 		{ "ldt-enabled",					CASE_NAMESPACE_LDT_ENABLED },
+		{ "ldt-gc-rate",                    CASE_NAMESPACE_LDT_GC_RATE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
@@ -840,6 +849,7 @@ const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
 		{ "data-in-memory",					CASE_NAMESPACE_STORAGE_DEVICE_DATA_IN_MEMORY },
 		{ "cold-start-empty",				CASE_NAMESPACE_STORAGE_DEVICE_COLD_START_EMPTY },
 		{ "defrag-lwm-pct",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_LWM_PCT },
+		{ "defrag-queue-min",				CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_QUEUE_MIN },
 		{ "defrag-sleep",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_SLEEP },
 		{ "defrag-startup-minimum",			CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_STARTUP_MINIMUM },
 		{ "disable-odirect",				CASE_NAMESPACE_STORAGE_DEVICE_DISABLE_ODIRECT },
@@ -931,6 +941,7 @@ const cfg_opt SECURITY_OPTS[] = {
 
 const cfg_opt SECURITY_LOG_OPTS[] = {
 		{ "report-authentication",			CASE_SECURITY_LOG_REPORT_AUTHENTICATION },
+		{ "report-data-op",					CASE_SECURITY_LOG_REPORT_DATA_OP },
 		{ "report-sys-admin",				CASE_SECURITY_LOG_REPORT_SYS_ADMIN },
 		{ "report-user-admin",				CASE_SECURITY_LOG_REPORT_USER_ADMIN },
 		{ "report-violation",				CASE_SECURITY_LOG_REPORT_VIOLATION },
@@ -940,6 +951,7 @@ const cfg_opt SECURITY_LOG_OPTS[] = {
 const cfg_opt SECURITY_SYSLOG_OPTS[] = {
 		{ "local",							CASE_SECURITY_SYSLOG_LOCAL },
 		{ "report-authentication",			CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION },
+		{ "report-data-op",					CASE_SECURITY_SYSLOG_REPORT_DATA_OP },
 		{ "report-sys-admin",				CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN },
 		{ "report-user-admin",				CASE_SECURITY_SYSLOG_REPORT_USER_ADMIN },
 		{ "report-violation",				CASE_SECURITY_SYSLOG_REPORT_VIOLATION },
@@ -1789,6 +1801,9 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_INFO_THREADS:
 				c->n_info_threads = cfg_int_no_checks(&line);
 				break;
+			case CASE_SERVICE_LDT_BENCHMARKS:
+				c->ldt_benchmarks = cfg_bool(&line);
+				break;
 			case CASE_SERVICE_MICROBENCHMARKS:
 				c->microbenchmarks = cfg_bool(&line);
 				break;
@@ -2364,6 +2379,9 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_LDT_ENABLED:
 				ns->ldt_enabled = cfg_bool(&line);
 				break;
+			case CASE_NAMESPACE_LDT_GC_RATE:
+				ns->ldt_gc_sleep_us = cfg_u64(&line, 1, LDT_SUB_GC_MAX_RATE) * 1000000;
+				break;
 			case CASE_NAMESPACE_MAX_TTL:
 				ns->max_ttl = cfg_seconds(&line);
 				break;
@@ -2507,6 +2525,9 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_LWM_PCT:
 				ns->storage_defrag_lwm_pct = cfg_u32_no_checks(&line);
+				break;
+			case CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_QUEUE_MIN:
+				ns->storage_defrag_queue_min = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_SLEEP:
 				ns->storage_defrag_sleep = cfg_u32_no_checks(&line);
@@ -2880,6 +2901,9 @@ as_config_init(const char *config_file)
 			case CASE_SECURITY_LOG_REPORT_AUTHENTICATION:
 				c->sec_cfg.report.authentication |= cfg_bool(&line) ? AS_SEC_SINK_LOG : 0;
 				break;
+			case CASE_SECURITY_LOG_REPORT_DATA_OP:
+				as_security_config_log_scope(AS_SEC_SINK_LOG, line.val_tok_1, line.val_tok_2);
+				break;
 			case CASE_SECURITY_LOG_REPORT_SYS_ADMIN:
 				c->sec_cfg.report.sys_admin |= cfg_bool(&line) ? AS_SEC_SINK_LOG : 0;
 				break;
@@ -2910,6 +2934,9 @@ as_config_init(const char *config_file)
 			case CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION:
 				c->sec_cfg.report.authentication |= cfg_bool(&line) ? AS_SEC_SINK_SYSLOG : 0;
 				break;
+			case CASE_SECURITY_SYSLOG_REPORT_DATA_OP:
+				as_security_config_log_scope(AS_SEC_SINK_SYSLOG, line.val_tok_1, line.val_tok_2);
+				break;
 			case CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN:
 				c->sec_cfg.report.sys_admin |= cfg_bool(&line) ? AS_SEC_SINK_SYSLOG : 0;
 				break;
@@ -2939,6 +2966,15 @@ as_config_init(const char *config_file)
 	}
 
 	fclose(FD);
+
+	//--------------------------------------------
+	// Checks that must wait until everything is parsed. Alternatively, such
+	// checks can be done in as_config_post_process() - doing them here means
+	// failure logs show in the console, doing them in as_config_post_process()
+	// means failure logs show in the log file.
+	//
+
+	as_security_config_check();
 
 	return &g_config;
 }
@@ -3232,6 +3268,12 @@ cfg_create_all_histograms()
 	create_and_check_hist(&c->write_sindex_hist, "write_sindex", HIST_MILLISECONDS);
 	create_and_check_hist(&c->defrag_storage_close_hist, "defrag_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->prole_fabric_send_hist, "prole_fabric_send", HIST_MILLISECONDS);
+
+	create_and_check_hist(&c->ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
+	create_and_check_hist(&c->ldt_io_record_cnt_hist, "ldt_rec_io_count", HIST_RAW);
+	create_and_check_hist(&c->ldt_update_record_cnt_hist, "ldt_rec_update_count", HIST_RAW);
+	create_and_check_hist(&c->ldt_update_io_bytes_hist, "ldt_rec_update_bytes", HIST_RAW);
+	create_and_check_hist(&c->ldt_hist, "ldt", HIST_MILLISECONDS);
 
 #ifdef HISTOGRAM_OBJECT_LATENCY
 	create_and_check_hist(&c->read0_hist, "read_0bucket", HIST_MILLISECONDS);

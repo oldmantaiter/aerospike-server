@@ -2013,8 +2013,9 @@ CloseSocket:
 					g_hb.endpoint_txlist_node_id[fd] = 0;
 					cf_atomic_int_incr(&g_config.heartbeat_connections_closed);
 					mesh_host_list_remove_fd(fd);
-					if (0 > epoll_ctl(g_hb.efd, EPOLL_CTL_DEL, fd, &g_hb.ev))
-						cf_crash(AS_HB,  "unable to remove socket %d from epoll fd list: %s", fd, cf_strerror(errno));
+					if (0 > epoll_ctl(g_hb.efd, EPOLL_CTL_DEL, fd, &g_hb.ev)) {
+						cf_warning(AS_HB, "unable to remove socket %d from epoll fd list: %s", fd, cf_strerror(errno));
+					}
 					close(fd);
 					continue;
 				}
@@ -2069,7 +2070,7 @@ CloseSocket:
 			for (int i = 0; i < AS_HB_TXLIST_SZ; i++) {
 				if (true == g_hb.endpoint_txlist[i]) {
 					if (true == g_hb.endpoint_txlist_isudp[i]) {
-						cf_detail(AS_HB, "sending upd heartbeat to index %d : msg size %d", i, n);
+						cf_detail(AS_HB, "sending udp heartbeat to index %d : msg size %d", i, n);
 						struct sockaddr_in so;
 						cf_sockaddr dest;
 						so.sin_family = AF_INET;

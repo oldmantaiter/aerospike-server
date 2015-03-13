@@ -51,9 +51,9 @@
 #include "fabric/paxos.h"
 
 
-#define MAX_TRANSACTION_QUEUES 64
-#define MAX_DEMARSHAL_THREADS  48	// maximum number of demarshal worker threads
-#define MAX_FABRIC_WORKERS 64		// maximum fabric worker threads
+#define MAX_TRANSACTION_QUEUES 128
+#define MAX_DEMARSHAL_THREADS  256	// maximum number of demarshal worker threads
+#define MAX_FABRIC_WORKERS 128		// maximum fabric worker threads
 #define MAX_BATCH_THREADS 16		// maximum batch worker threads
 
 struct as_namespace_s;
@@ -182,6 +182,9 @@ typedef struct as_config_s {
 
 	// whether to collect storage benchmarks
 	bool				storage_benchmarks;
+	
+	// whether to collect ldt benchmarks
+	bool				ldt_benchmarks;
 
 	// whether memory accounting is enabled
 	bool				memory_accounting;
@@ -352,8 +355,10 @@ typedef struct as_config_s {
 	cf_atomic_int		migrate_num_incoming_refused; // For receiver-side migration flow control.
 	cf_atomic_int		proto_transactions;
 	cf_atomic_int		proxy_initiate; // initiated
+	cf_atomic_int		ldt_proxy_initiate; // initiated
 	cf_atomic_int		proxy_action;   // did it
 	cf_atomic_int		proxy_retry;    // retried it
+	cf_atomic_int		ldt_proxy_timeout;    // retried it
 	cf_atomic_int		proxy_retry_q_full;
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
@@ -465,6 +470,15 @@ typedef struct as_config_s {
 	histogram *			read8_hist;
 	histogram *			read9_hist;
 #endif
+
+	// LDT related histogram
+	histogram *			ldt_multiop_prole_hist;   // histogram that tracks LDT multi op replication performance (in fabric)
+	histogram *			ldt_update_record_cnt_hist; // histogram that tracks number of records written (write/update)
+                                             // by LDT UDF execluding parent record
+	histogram *			ldt_io_record_cnt_hist; // histogram that tracks number of records opened (write/update)
+                                             // by LDT UDF execluding parent record
+	histogram *			ldt_update_io_bytes_hist;   // histogram that tracks number bytes written by LDT every transaction
+	histogram * 		ldt_hist;            // histogram that tracks ldt performance
 
 	cf_atomic_int		stat_read_reqs;
 	cf_atomic_int		stat_read_reqs_xdr;
@@ -580,6 +594,10 @@ typedef struct as_config_s {
 	cf_atomic_int		err_write_fail_incompatible_type;
 	cf_atomic_int		err_write_fail_prole_delete;
 	cf_atomic_int		err_write_fail_key_mismatch;
+	cf_atomic_int		err_write_fail_record_too_big;
+	cf_atomic_int		err_write_fail_bin_name;
+	cf_atomic_int		err_write_fail_bin_not_found;
+	cf_atomic_int		err_write_fail_forbidden;
 
 	cf_atomic_int		stat_duplicate_operation;
 

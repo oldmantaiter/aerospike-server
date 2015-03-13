@@ -36,6 +36,7 @@ endif
 
 	install -pm 644 $(DEPTH)/as/etc/aerospike.conf $(BUILD_ROOT)/etc/aerospike
 	install -pm 644 $(DEPTH)/as/etc/aerospike_ssd.conf $(BUILD_ROOT)/etc/aerospike
+	install -pm 644 $(DEPTH)/as/etc/aerospike_mesh.conf $(BUILD_ROOT)/etc/aerospike
 
 ifeq ($(OS), el7)
 	install -p -D -m 644 $(DEPTH)/as/etc/aerospike-server.service $(BUILD_ROOT)/usr/lib/systemd/system/aerospike.service

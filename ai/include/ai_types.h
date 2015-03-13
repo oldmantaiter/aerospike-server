@@ -54,8 +54,8 @@ typedef struct uint160 {
  */
 #define NAME_STR_LEN               128
 
-#define INIT_MAX_NUM_TABLES        64
-#define INIT_MAX_NUM_INDICES       64
+#define INIT_MAX_NUM_TABLES        256
+#define INIT_MAX_NUM_INDICES       256
 
 #define MAX_PARTITIONS_PER_INDEX   256
 

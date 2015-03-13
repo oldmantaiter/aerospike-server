@@ -113,6 +113,7 @@ typedef struct write_request_s {
 	// udf request data
 	ureq_data            udata;
 	bool                 shipped_op;
+	bool                 shipped_op_initiator;
 	uint8_t              ldt_rectype_bits;
 	bool                 has_udf;
 

@@ -70,6 +70,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_KEY_MISMATCH 19
 #define AS_PROTO_RESULT_FAIL_NAMESPACE 20
 #define AS_PROTO_RESULT_FAIL_BIN_NAME 21
+#define AS_PROTO_RESULT_FAIL_FORBIDDEN 22 // operation (perhaps temporarily) not possible
 
 // Security result codes. Must be <= 255, to fit in one byte. Defined here to
 // ensure no overlap with other result codes.
@@ -90,7 +91,8 @@ struct as_file_handle_s;
 #define AS_SEC_ERR_CREDENTIAL			65	// no credential or bad credential
 	// ... room for more ...
 #define AS_SEC_ERR_ROLE					70	// no role(s) or unknown role(s)
-#define AS_SEC_ERR_PRIVILEGE			71	// no privileges or unknown privileges
+#define AS_SEC_ERR_ROLE_EXISTS			71	// role already exists
+#define AS_SEC_ERR_PRIVILEGE			72	// no privileges or unknown privileges
 	// Permission errors.
 #define AS_SEC_ERR_NOT_AUTHENTICATED	80	// socket not authenticated
 #define AS_SEC_ERR_ROLE_VIOLATION		81	// role (privilege) violation
@@ -486,7 +488,7 @@ extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generatio
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
 		size_t *msg_sz_in, uint64_t trid, const char *setname);
 extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,
-		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, cf_vector *);
+		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, bool skip_empty_records, cf_vector *);
 extern int as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code,
 		cf_buf_builder **bb_r, char *nsname);
 extern size_t as_msg_get_bufbuilder_newsize(struct as_index_s *r, struct as_storage_rd_s *rd,

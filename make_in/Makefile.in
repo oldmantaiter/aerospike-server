@@ -147,6 +147,9 @@ DEF_FN += -D__FILENAME__=\"$(notdir $<)\"
 #CFLAGS_64 = $(COMMON_FLAGS) -DMARCH_x86_64
 #CFLAGS_32 = $(COMMON_CFLAGS) -DMARCH_i686
 
-LDFLAGS = -rdynamic -L$(CF_LIB_DIR) -L$(XDR_LIB_DIR) -L$(KV_LIB_DIR) $(WRAPFLAGS)
+LDFLAGS = -rdynamic -L$(CF_LIB_DIR) -L$(XDR_LIB_DIR) $(WRAPFLAGS)
+ifeq ($(USE_KV),1)
+  LDFLAGS += -L$(KV_LIB_DIR)
+endif
 
 STRIP = strip -p -v -s

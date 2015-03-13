@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -291,30 +292,73 @@ transaction_check_msg(as_transaction *tr)
 
 
 static inline bool
-security_check(as_transaction *tr, as_sec_priv priv)
-{
-	uint8_t result = as_security_check(tr->proto_fd_h, priv);
-
-	if (result != AS_PROTO_RESULT_OK) {
-		// For now we don't log successful data operations.
-		as_security_log(tr->proto_fd_h, result, priv, NULL, NULL);
-
-		as_msg_send_error(tr->proto_fd_h, (uint32_t)result);
-		tr->proto_fd_h = 0;
-		MICROBENCHMARK_HIST_INSERT_P(error_hist);
-		// TODO - error statistics.
-
-		return false;
-	}
-
-	return true;
-}
-
-
-static inline bool
 is_udf(cl_msg *msgp)
 {
 	return as_msg_field_get(&msgp->msg, AS_MSG_FIELD_TYPE_UDF_FILENAME) != NULL;
+}
+
+
+int
+as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
+{
+	if (-2 == rv) {
+		cf_debug_digest(AS_TSVC, &(tr->keyd), "write re-attempt: ");
+		as_partition_release(&tr->rsv);
+		cf_atomic_int_decr(&g_config.rw_tree_count);
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(error_hist);
+		thr_tsvc_enqueue(tr);
+		*free_msgp = false;
+	} else if (-3 == rv) {
+		cf_debug(AS_TSVC,
+				"write in progress on key - delay and reattempt");
+		as_partition_release(&tr->rsv);
+		cf_atomic_int_decr(&g_config.rw_tree_count);
+		MICROBENCHMARK_HIST_INSERT_P(error_hist);
+		as_fabric_msg_put(tr->proxy_msg);
+	} else {
+		cf_debug(AS_TSVC,
+				"write start failed: rv %d proto result %d", rv,
+				tr->result_code);
+		as_partition_release(&tr->rsv);
+		cf_atomic_int_decr(&g_config.rw_tree_count);
+		if (tr->result_code == 0) {
+			cf_warning(AS_TSVC,
+					"   warning: failure should have set protocol result code");
+			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+		if (tr->proto_fd_h) {
+			if (0 != as_msg_send_reply(tr->proto_fd_h,
+						tr->result_code, 0, 0, 0, 0, 0, 0, 0, tr->trid, NULL))
+			{
+				cf_info(AS_TSVC,
+						"tsvc read: can't send error msg, fd %d",
+						tr->proto_fd_h->fd);
+			}
+			tr->proto_fd_h = 0;
+			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		}
+		else if (tr->proxy_msg) {
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
+				cf_detail_digest(AS_RW, &(tr->keyd),
+						"SHIPPED_OP :: Sending ship op reply, rc %d to (%"PRIx64") ::",
+						tr->result_code, tr->proxy_node);
+			}
+			else {
+				cf_detail(AS_RW,
+						"sending proxy reply, rc %d to %"PRIx64"",
+						tr->result_code, tr->proxy_node);
+			}
+			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
+					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
+		} else {
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+		}
+		return -1;
+	}
+	return 0;
 }
 
 
@@ -340,7 +384,7 @@ process_transaction(as_transaction *tr)
 	uint64_t node_cluster_key = 0;
 
 	int rv;
-	int free_msgp = true;
+	bool free_msgp = true;
 	as_namespace *ns = 0;
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(q_wait_hist);
@@ -371,8 +415,19 @@ process_transaction(as_transaction *tr)
 	}
 
 	// First, check that the socket is authenticated.
-	if (tr->proto_fd_h && ! security_check(tr, PRIV_NONE)) {
-		goto Cleanup;
+	if (tr->proto_fd_h) {
+		uint8_t result = as_security_check(tr->proto_fd_h, PERM_NONE);
+
+		if (result != AS_PROTO_RESULT_OK) {
+			as_security_log(tr->proto_fd_h, result, PERM_NONE, NULL, NULL);
+
+			as_msg_send_error(tr->proto_fd_h, (uint32_t)result);
+			tr->proto_fd_h = 0;
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+			// TODO - error statistics.
+
+			goto Cleanup;
+		}
 	}
 
 	// If this key digest hasn't been computed yet, prepare the transaction -
@@ -396,8 +451,8 @@ process_transaction(as_transaction *tr)
 						AS_MSG_FIELD_TYPE_INDEX_RANGE) != NULL) {
 					cf_detail(AS_TSVC, "Received Query Request(%"PRIx64")", tr->trid);
 					cf_atomic64_incr(&g_config.query_reqs);
-					if (! security_check(tr,
-							is_udf(msgp) ? PRIV_UDF_QUERY : PRIV_QUERY)) {
+					if (! as_security_check_data_op(tr, &msgp->msg, ns,
+							is_udf(msgp) ? PERM_UDF_QUERY : PERM_QUERY)) {
 						goto Cleanup;
 					}
 					// Responsibility of query layer to free the msgp.
@@ -414,8 +469,8 @@ process_transaction(as_transaction *tr)
 					// We got a scan, it might be for udfs, no need to know now,
 					// for now, do not free msgp for all the cases. Should take
 					// care of it inside as_tscan.
-					if (! security_check(tr,
-							is_udf(msgp) ? PRIV_UDF_SCAN : PRIV_SCAN)) {
+					if (! as_security_check_data_op(tr, &msgp->msg, ns,
+							is_udf(msgp) ? PERM_UDF_SCAN : PERM_SCAN)) {
 						goto Cleanup;
 					}
 					free_msgp = false;
@@ -442,7 +497,7 @@ process_transaction(as_transaction *tr)
 				}
 			} else if (rv == -3) {
 				// Has digest array, is batch - msgp gets freed through cleanup.
-				if (! security_check(tr, PRIV_READ)) {
+				if (! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
 					goto Cleanup;
 				}
 				if (0 != as_batch(tr)) {
@@ -555,11 +610,9 @@ process_transaction(as_transaction *tr)
 			if (tr->udata.req_udata) {
 				free_msgp = false;
 			}
-			else if (tr->proto_fd_h && ! security_check(tr,
-					is_udf(msgp) ? PRIV_UDF_APPLY : PRIV_WRITE)) {
+			else if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_WRITE)) {
 				goto Cleanup;
 			}
-
 
 			// If the transaction is "shipped proxy op" to the winner node then
 			// just do the migrate reservation.
@@ -588,7 +641,7 @@ process_transaction(as_transaction *tr)
 		}
 		else {  // <><><> READ Transaction <><><>
 
-			if (tr->proto_fd_h && ! security_check(tr, PRIV_READ)) {
+			if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
 				goto Cleanup;
 			}
 
@@ -711,95 +764,43 @@ process_transaction(as_transaction *tr)
 			// -2 :: "try again"
 			// -3 :: "duplicate proxy request, drop"
 			if (0 != rv) {
-				if (-2 == rv) {
-					cf_debug_digest(AS_TSVC, &(tr->keyd), "write re-attempt: ");
-					as_partition_release(&tr->rsv);
-					cf_atomic_int_decr(&g_config.rw_tree_count);
-					MICROBENCHMARK_HIST_INSERT_AND_RESET_P(error_hist);
-					thr_tsvc_enqueue(tr);
-					free_msgp = false;
-				} else if (-3 == rv) {
-					cf_debug(AS_TSVC,
-							"write in progress on key - delay and reattempt");
-					as_partition_release(&tr->rsv);
-					cf_atomic_int_decr(&g_config.rw_tree_count);
-					MICROBENCHMARK_HIST_INSERT_P(error_hist);
-					as_fabric_msg_put(tr->proxy_msg);
-					if (free_msgp == true) {
-						cf_free(msgp);
-						free_msgp = false;
-					}
-				} else {
-					cf_debug(AS_TSVC,
-							"write start failed: rv %d proto result %d", rv,
-							tr->result_code);
-					as_partition_release(&tr->rsv);
-					cf_atomic_int_decr(&g_config.rw_tree_count);
-					if (tr->result_code == 0) {
-						cf_warning(AS_TSVC,
-								"   warning: failure should have set protocol result code");
-						tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-					}
-					if (tr->proto_fd_h) {
-						if (0 != as_msg_send_reply(tr->proto_fd_h,
-								tr->result_code, 0, 0, 0, 0, 0, 0, 0, tr->trid, NULL))
-						{
-							cf_info(AS_TSVC,
-									"tsvc read: can't send error msg, fd %d",
-									tr->proto_fd_h->fd);
-						}
-						tr->proto_fd_h = 0;
-						// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-						MICROBENCHMARK_HIST_INSERT_P(error_hist);
-						cf_atomic_int_incr(&g_config.err_tsvc_requests);
-					}
-					else if (tr->proxy_msg) {
-						MICROBENCHMARK_HIST_INSERT_P(error_hist);
-						if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-							cf_detail_digest(AS_RW, &(tr->keyd),
-									"SHIPPED_OP :: Sending ship op reply, rc %d to (%"PRIx64") ::",
-									tr->result_code, tr->proxy_node);
-						}
-						else {
-							cf_detail(AS_RW,
-									"sending proxy reply, rc %d to %"PRIx64"",
-									tr->result_code, tr->proxy_node);
-						}
-						as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-								tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-					} else {
-						MICROBENCHMARK_HIST_INSERT_P(error_hist);
-					}
-					if (free_msgp == true) {
-						cf_free(msgp);
-						free_msgp = false;
-					}
-					goto Cleanup;
-				}
+				rv = as_rw_process_result(rv, tr, &free_msgp); 
 			}
 			if (free_msgp == true) {
 				cf_free(msgp);
 				free_msgp = false;
 			}
-
+			if (rv) {
+				goto Cleanup;
+			}
 		} else {
 			// rv != 0 or cluster keys DO NOT MATCH.
 			//
 			// Make sure that if it is shipped op it is not further redirected.
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-				cf_warning(AS_RW,
-						"Redirecting the shipped op is not supported fail the operation %d",
-						rv);
-			}
+		
+				int ret_code = 0;
+				if (!cluster_keys_match) {
+					ret_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
+				} else {
+					cf_warning(AS_RW,
+							"Failing the shipped op due to reservation error %d",
+							rv);
+					ret_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+				}
 
-			// Divert the transaction into the proxy system; in this case, no
-			// reservation was obtained. Pass the cluster key along. Note that
-			// if we landed here because of a CLUSTER KEY MISMATCH,
-			// (transaction CK != Partition CK), then it is probably the case
-			// that we have to forward this request by proxy, since the
-			// partition for this transaction has probably moved and is no
-			// longer appropriate for this node.
-			if (tr->proto_fd_h) {
+				as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
+						ret_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
+
+			} else if (tr->proto_fd_h) {
+				// Divert the transaction into the proxy system; in this case, no
+				// reservation was obtained. Pass the cluster key along. Note that
+				// if we landed here because of a CLUSTER KEY MISMATCH,
+				// (transaction CK != Partition CK), then it is probably the case
+				// that we have to forward this request by proxy, since the
+				// partition for this transaction has probably moved and is no
+				// longer appropriate for this node.
+
 				// Proxy divert - reroute client message. Note that
 				// as_proxy_divert() consumes the msgp.
 				cf_detail(AS_PROXY, "proxy divert (wr) to %("PRIx64")", dest);

@@ -103,7 +103,8 @@ char *cf_fault_context_strings[] = {
 	"ldt",         // 54
 	"cf:jem",      // 55
 	"security",    // 56
-	NULL           // 57
+	"aggr",        // 57
+	NULL           // 58
 };
 
 static const char *cf_fault_severity_strings[] = { "CRITICAL", "WARNING", "INFO", "DEBUG", "DETAIL", NULL };
@@ -274,7 +275,7 @@ cf_fault_sink_activate_all_held()
 		if (0 == strncmp(s->path, "stderr", 6)) {
 			s->fd = 2;
 		}
-		else if (-1 == (s->fd = open(s->path, O_WRONLY|O_CREAT|O_APPEND|O_NONBLOCK, S_IRUSR|S_IWUSR))) {
+		else if (-1 == (s->fd = open(s->path, O_WRONLY|O_CREAT|O_NONBLOCK|O_APPEND, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH))) {
 			// In case this isn't first sink, force logging as if no sinks:
 			cf_fault_sinks_inuse = 0;
 			cf_warning(CF_MISC, "can't open %s: %s", s->path, cf_strerror(errno));
@@ -912,7 +913,7 @@ cf_fault_sink_logroll(void)
 			unlink(s->path);
 			close(fd);
 		}
-		int fd = open(s->path, O_WRONLY|O_CREAT|O_NONBLOCK|O_APPEND, S_IRUSR|S_IWUSR);
+		int fd = open(s->path, O_WRONLY|O_CREAT|O_NONBLOCK|O_APPEND, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
 		s->fd = fd;
 	}
 }

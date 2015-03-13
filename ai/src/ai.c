@@ -311,7 +311,7 @@ static int newIndex(char *iname, int tmatch, icol_t *ic, uchar cnstr, uchar dtyp
 		return -1;
 	}
 
-	if ((DropI && DropI->head) || (Num_indx >= (int) Ind_HW)) {
+	if (cf_ll_size(DropI) == 0 && (Num_indx >= (int) Ind_HW)) {
 		Ind_HW++;
 		r_ind_t *indxs = cf_malloc(sizeof(r_ind_t) * Ind_HW);
 		bzero(indxs, sizeof(r_ind_t) * Ind_HW);
@@ -414,7 +414,7 @@ static int newTable(cf_ll *ctypes, cf_ll *cnames, int ccount, char *tname)
 		return -1;
 	}
 
-	if (!DropT && Num_tbls >= (int) Tbl_HW) {
+	if (cf_ll_size(DropT) == 0 && Num_tbls >= (int) Tbl_HW) {
 		Tbl_HW++;
 		r_tbl_t *tbls = cf_malloc(sizeof(r_tbl_t) * Tbl_HW);
 		bzero(tbls, sizeof(r_tbl_t) * Tbl_HW);

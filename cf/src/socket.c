@@ -286,14 +286,19 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 
 	memset(&s->saddr,0,sizeof(s->saddr));
 	s->saddr.sin_family = AF_INET;
-	if (0 >= inet_pton(AF_INET, s->addr, &s->saddr.sin_addr.s_addr)) {
+	int rv = inet_pton(AF_INET, s->addr, &s->saddr.sin_addr.s_addr);
+	if (rv < 0) {
 		cf_warning(CF_SOCKET, "inet_pton: %s", cf_strerror(errno));
 		close(s->sock);
 		return(errno);
+	} else if (rv == 0) {
+		cf_warning(CF_SOCKET, "inet_pton: invalid ip %s", s->addr);
+		close(s->sock);
+		return(-1);
 	}
 	s->saddr.sin_port = htons(s->port);
 
-	int rv = connect(s->sock, (struct sockaddr *)&s->saddr, sizeof(s->saddr));
+	rv = connect(s->sock, (struct sockaddr *)&s->saddr, sizeof(s->saddr));
 	cf_debug(CF_SOCKET, "connect: rv %d errno %s",rv,cf_strerror(errno));
 
 	if (rv < 0) {

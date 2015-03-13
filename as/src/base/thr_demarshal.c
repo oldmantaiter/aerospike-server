@@ -497,26 +497,25 @@ thr_demarshal(void *arg)
 //							cf_debug(AS_DEMARSHAL, "Found %d AS_MSG fields", n_fields);
 							while (!found && (field_num < n_fields)) {
 								as_msg_field *field = (as_msg_field *) (&peekbuf[offset]);
-								uint32_t field_sz = ntohl(field->field_sz);
+								uint32_t value_sz = ntohl(field->field_sz) - 1;
 //								cf_debug(AS_DEMARSHAL, "Field #%d offset: %lu", field_num, offset);
-//								cf_debug(AS_DEMARSHAL, "\tfield_sz %u", field_sz);
+//								cf_debug(AS_DEMARSHAL, "\tvalue_sz %u", value_sz);
 //								cf_debug(AS_DEMARSHAL, "\ttype %d", field->type);
 								if (AS_MSG_FIELD_TYPE_NAMESPACE == field->type) {
-									if (field_sz >= AS_ID_NAMESPACE_SZ) {
-										cf_warning(AS_DEMARSHAL, "namespace too long (%u) in as_msg", field_sz);
+									if (value_sz >= AS_ID_NAMESPACE_SZ) {
+										cf_warning(AS_DEMARSHAL, "namespace too long (%u) in as_msg", value_sz);
 										break;
 									}
 									char ns[AS_ID_NAMESPACE_SZ];
 									found = true;
-									size_t field_sz_minus_1 = field_sz - 1;
-									memcpy(ns, field->data, field_sz_minus_1);
-									ns[field_sz_minus_1] = '\0';
+									memcpy(ns, field->data, value_sz);
+									ns[value_sz] = '\0';
 //									cf_debug(AS_DEMARSHAL, "Found ns \"%s\" in field #%d.", ns, field_num);
 									jem_set_arena(as_namespace_get_jem_arena(ns));
 								} else {
 //									cf_debug(AS_DEMARSHAL, "Message field %d is not namespace (type %d) ~~ Reading next field", field_num, field->type);
 									field_num++;
-									offset += field_sz + sizeof(as_msg_field) - 1;
+									offset += sizeof(as_msg_field) + value_sz;
 									if (offset >= peekbuf_sz) {
 										break;
 									}
@@ -654,6 +653,7 @@ NextEvent_FD_Cleanup:
 				// If we allocated memory for the incoming message, free it.
 				if (proto_p) {
 					cf_free(proto_p);
+					fd_h->proto = 0;
 				}
 				// If fd has extra reference for transaction, release it.
 				if (has_extra_ref) {

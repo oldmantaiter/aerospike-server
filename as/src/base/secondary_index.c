@@ -400,7 +400,7 @@ as_sindex__dup_meta(as_sindex_metadata *imd, as_sindex_metadata **qimd,
 int
 as_sindex__get_simatches_by_sbin(as_namespace *ns, const char *set,
 								 as_sindex_bin *sbin, int num_bins,
-								 int8_t *simatches, bool isw, int *matches)
+								 int *simatches, bool isw, int *matches)
 {
 	if (ns->single_bin) {
 		GTRACE(META, debug, "No Index On Namespace with Single Bin");
@@ -697,7 +697,7 @@ as_sindex__op_by_sbin(as_namespace *ns, const char *set,
 	}
 
 	// Maximum matches are equal to number of bins
-	int8_t simatches[numbins];
+	int simatches[numbins];
 	int num_matches = 0;
 	if (as_sindex__get_simatches_by_sbin(ns, set, sbin,
 				numbins, simatches, (op != AS_SINDEX_OP_READ), &num_matches) != AS_SINDEX_OK) {
@@ -962,6 +962,9 @@ as_sindex_reserve(as_sindex *si, char *fname, int lineno)
 {
 	if (si->imd) cf_rc_reserve(si->imd);
 	int count = cf_rc_count(si->imd);
+	if (!as_sindex_isactive(si)) {
+		cf_warning(AS_SINDEX, "Reserving an inactive sindex %s at %s:%d", si->imd->iname, fname, lineno);
+	}
 	SITRACE(si, RESERVE, debug, "Index %s in %d state Reserved to reference count %d < 2 at %s:%d", si->imd->iname, si->state, count, fname, lineno);
 	return AS_SINDEX_OK;
 }
@@ -1014,7 +1017,7 @@ as_sindex_release(as_sindex *si, char *fname, int lineno)
 					si->imd->iname, si->state, val, fname, lineno);
 		// Display a warning when rc math is messed-up during sindex-delete
 		if(si->state == AS_SINDEX_DESTROY){
-			cf_warning(AS_SINDEX,"Returning from a sindex destroy op for: %s with reference count %"PRIu64"", si->imd->iname, val);
+			cf_debug(AS_SINDEX,"Returning from a sindex destroy op for: %s with reference count %"PRIu64"", si->imd->iname, val);
 		}
 		SINDEX_UNLOCK(&si->imd->slock);
 	}
@@ -1763,7 +1766,7 @@ as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db)
 {
 	SINDEX_GRLOCK();
 	for (int i = 0; i < AS_SINDEX_MAX; i++) {
-		if (&(ns->sindex[i]) && (ns->sindex[i].imd)) {
+		if (&(ns->sindex[i]) && (ns->sindex[i].imd) && as_sindex_isactive(&ns->sindex[i])) {
 			as_sindex si = ns->sindex[i];
 			AS_SINDEX_RESERVE(&si);
 			SINDEX_RLOCK(&si.imd->slock);
@@ -3057,7 +3060,7 @@ as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, ui
 				// Create List of Index to be Deleted
 				for (int i = 0; i < AS_SINDEX_MAX; i++) {
 					as_sindex *si = &local_ns->sindex[i];
-					if (si && si->imd) {
+					if (si && si->imd && as_sindex_isactive(si)) {
 						int found     = 0;
 						SINDEX_RLOCK(&si->imd->slock);
 						for (int j = 0; j < items->num_items; j++) {
