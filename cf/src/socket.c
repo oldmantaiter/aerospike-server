@@ -79,16 +79,18 @@ cf_sockaddr_setport(cf_sockaddr *so, unsigned short port)
 int
 cf_socket_set_nonblocking(int s)
 {
-	int flags;
+	int flags = 0;
 
-	if (-1 == (flags = fcntl(s, F_GETFL, 0)))
-		flags = 0;
+	if (-1 == (flags = fcntl(s, F_GETFL, 0))) {
+		cf_warning(CF_SOCKET, "fcntl(): failed to get socket %d flags - %s", s, cf_strerror(errno));
+		return(-1);
+	}
 	if (-1 == fcntl(s, F_SETFL, flags | O_NONBLOCK)) {
-		cf_crash(CF_SOCKET, "fcntl(): %s", cf_strerror(errno));
-		return(0);
+		cf_warning(CF_SOCKET, "fcntl(): failed to set socket %d O_NONBLOCK flag - %s", s, cf_strerror(errno));
+		return(-1);
 	}
 
-	return(1);
+	return(0);
 }
 
 void
@@ -258,9 +260,6 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	return(0);
 }
 
-
-#define CONNECT_TIMEOUT 1000
-
 /* cf_socket_init_client
  * Connect a socket to a remote endpoint
  * DOES A BLOCKING CONNECT INLINE - timeout
@@ -282,7 +281,6 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 //	int flag = (1024 * 32);
 //	setsockopt(s->sock, SOL_SOCKET, SO_SNDBUF, &flag, sizeof(flag) );
 //	setsockopt(s->sock, SOL_SOCKET, SO_RCVBUF, &flag, sizeof(flag) );
-
 
 	memset(&s->saddr,0,sizeof(s->saddr));
 	s->saddr.sin_family = AF_INET;
@@ -370,7 +368,7 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 Retry:
 				cf_debug(CF_SOCKET, "Connect epoll loop:  Retry #%d", tries++);
 				if (start + timeout < cf_getms()) {
-					cf_warning(CF_SOCKET, "Error in delayed connect(): timed out");
+					cf_warning(CF_SOCKET, "Error in delayed connect() to %s:%d: timed out", s->addr, s->port);
 					errno = ETIMEDOUT;
 					goto Fail;
 				}
